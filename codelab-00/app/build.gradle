@@ -69,6 +69,8 @@ dependencies {
     implementation "android.arch.navigation:navigation-fragment-ktx:$version_nav"
     implementation "android.arch.navigation:navigation-ui-ktx:$version_nav"
 
+    implementation "com.android.billingclient:billing:1.2"
+
     androidTestImplementation 'junit:junit:4.12'
 
     // Android Testing Support Library's runner and rules
