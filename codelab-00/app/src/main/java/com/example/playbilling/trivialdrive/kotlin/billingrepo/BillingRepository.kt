@@ -16,6 +16,20 @@ class BillingRepository private constructor(private val application: Application
         PurchasesUpdatedListener, BillingClientStateListener,
         ConsumeResponseListener, SkuDetailsResponseListener {
 
+    companion object {
+        private const val LOG_TAG = "BillingRepository"
+
+        @Volatile
+        private var INSTANCE: BillingRepository? = null
+
+        fun getInstance(application: Application): BillingRepository =
+                INSTANCE ?: synchronized(this) {
+                    INSTANCE
+                            ?: BillingRepository(application)
+                                    .also { INSTANCE = it }
+                }
+    }
+
     override fun onPurchasesUpdated(responseCode: Int, purchases: MutableList<Purchase>?) {
         TODO("not implemented") //To change body of created functions use File | Settings | File Templates.
     }
@@ -61,7 +75,7 @@ class BillingRepository private constructor(private val application: Application
          */
 
         fun connectionRetryPolicy(block: () -> Unit) {
-            Log.d("BillingRepository", "connectionRetryPolicy")
+            Log.d(LOG_TAG, "connectionRetryPolicy")
             val scope = CoroutineScope(Job() + Dispatchers.Main)
             scope.launch {
                 val counter = retryCounter.getAndIncrement()
@@ -82,7 +96,7 @@ class BillingRepository private constructor(private val application: Application
             val scope = CoroutineScope(Job() + Dispatchers.Main)
             scope.launch {
                 if (!billingClient.isReady) {
-                    Log.d("BillingRepository", "taskExecutionRetryPolicy billing not ready")
+                    Log.d(LOG_TAG, "taskExecutionRetryPolicy billing not ready")
                     billingClient.startConnection(listener)
                     delay(taskDelay)
                 }
