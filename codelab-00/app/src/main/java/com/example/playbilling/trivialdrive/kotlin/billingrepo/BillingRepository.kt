@@ -3,10 +3,12 @@ package com.example.playbilling.trivialdrive.kotlin.billingrepo
 import android.app.Application
 import android.content.Context
 import android.util.Log
+import androidx.lifecycle.LiveData
 import com.android.billingclient.api.*
 import com.example.playbilling.trivialdrive.kotlin.billingrepo.BillingRepository.GameSku.CONSUMABLE_SKUS
 import com.example.playbilling.trivialdrive.kotlin.billingrepo.BillingRepository.GameSku.INAPP_SKUS
 import com.example.playbilling.trivialdrive.kotlin.billingrepo.BillingRepository.GameSku.SUBS_SKUS
+import com.example.playbilling.trivialdrive.kotlin.billingrepo.localdb.*
 import kotlinx.coroutines.*
 import java.util.*
 import java.util.concurrent.atomic.AtomicInteger
@@ -16,6 +18,12 @@ class BillingRepository private constructor(private val application: Application
         PurchasesUpdatedListener, BillingClientStateListener,
         ConsumeResponseListener, SkuDetailsResponseListener {
 
+    private lateinit var playStoreBillingClient: BillingClient
+
+    private lateinit var secureServerBillingClient: BillingWebservice
+
+    private lateinit var localCacheBillingClient: LocalBillingDb
+
     companion object {
         private const val LOG_TAG = "BillingRepository"
 
@@ -24,10 +32,72 @@ class BillingRepository private constructor(private val application: Application
 
         fun getInstance(application: Application): BillingRepository =
                 INSTANCE ?: synchronized(this) {
-                    INSTANCE
-                            ?: BillingRepository(application)
-                                    .also { INSTANCE = it }
+                    INSTANCE ?: BillingRepository(application).also { INSTANCE = it }
                 }
+    }
+
+    val subsSkuDetailsListLiveData: LiveData<List<AugmentedSkuDetails>> by lazy {
+        if (!::localCacheBillingClient.isInitialized) {
+            localCacheBillingClient = LocalBillingDb.getInstance(application)
+        }
+        localCacheBillingClient.skuDetailsDao().getSubscriptionSkuDetails()
+    }
+
+    val inappSkuDetailsListLiveData: LiveData<List<AugmentedSkuDetails>> by lazy {
+        if (!::localCacheBillingClient.isInitialized) {
+            localCacheBillingClient = LocalBillingDb.getInstance(application)
+        }
+        localCacheBillingClient.skuDetailsDao().getInappSkuDetails()
+    }
+
+    val gasTankLiveData: LiveData<GasTank> by lazy {
+        if (!::localCacheBillingClient.isInitialized) {
+            localCacheBillingClient = LocalBillingDb.getInstance(application)
+        }
+        localCacheBillingClient.entitlementsDao().getGasTank()
+    }
+
+    val premiumCarLiveData: LiveData<PremiumCar> by lazy {
+        if (!::localCacheBillingClient.isInitialized) {
+            localCacheBillingClient = LocalBillingDb.getInstance(application)
+        }
+        localCacheBillingClient.entitlementsDao().getPremiumCar()
+    }
+
+    val goldStatusLiveData: LiveData<GoldStatus> by lazy {
+        if (!::localCacheBillingClient.isInitialized) {
+            localCacheBillingClient = LocalBillingDb.getInstance(application)
+        }
+        localCacheBillingClient.entitlementsDao().getGoldStatus()
+    }
+
+    fun startDataSourceConnections() {
+        Log.d(LOG_TAG, "startDataSourceConnections")
+        instantiateAndConnectToPlayBillingService()
+        secureServerBillingClient = BillingWebservice.create()
+        localCacheBillingClient = LocalBillingDb.getInstance(application)
+    }
+
+    fun endDataSourceConnections() {
+        playStoreBillingClient.endConnection()
+        // normally you don't worry about closing a DB connection unless you have
+        // more than one open. so no need to call 'localCacheBillingClient.close()'
+        Log.d(LOG_TAG, "startDataSourceConnections")
+    }
+
+    private fun instantiateAndConnectToPlayBillingService() {
+        playStoreBillingClient = BillingClient.newBuilder(application.applicationContext)
+                .setListener(this).build()
+        connectToPlayBillingService()
+    }
+
+    private fun connectToPlayBillingService(): Boolean {
+        Log.d(LOG_TAG, "connectToPlayBillingService")
+        if (!playStoreBillingClient.isReady) {
+            playStoreBillingClient.startConnection(this)
+            return true
+        }
+        return false
     }
 
     override fun onPurchasesUpdated(responseCode: Int, purchases: MutableList<Purchase>?) {
