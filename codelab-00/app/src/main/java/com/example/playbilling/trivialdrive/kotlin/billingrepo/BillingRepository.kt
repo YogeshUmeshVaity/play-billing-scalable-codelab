@@ -8,6 +8,8 @@ import com.android.billingclient.api.*
 import com.example.playbilling.trivialdrive.kotlin.billingrepo.BillingRepository.GameSku.CONSUMABLE_SKUS
 import com.example.playbilling.trivialdrive.kotlin.billingrepo.BillingRepository.GameSku.INAPP_SKUS
 import com.example.playbilling.trivialdrive.kotlin.billingrepo.BillingRepository.GameSku.SUBS_SKUS
+import com.example.playbilling.trivialdrive.kotlin.billingrepo.BillingRepository.RetryPolicies.resetConnectionRetryPolicyCounter
+import com.example.playbilling.trivialdrive.kotlin.billingrepo.BillingRepository.RetryPolicies.taskExecutionRetryPolicy
 import com.example.playbilling.trivialdrive.kotlin.billingrepo.localdb.*
 import kotlinx.coroutines.*
 import java.util.*
@@ -109,7 +111,24 @@ class BillingRepository private constructor(private val application: Application
     }
 
     override fun onBillingSetupFinished(responseCode: Int) {
-        TODO("not implemented") //To change body of created functions use File | Settings | File Templates.
+        when (responseCode) {
+            BillingClient.BillingResponse.OK -> {
+                Log.d(LOG_TAG, "onBillingSetupFinished successfully")
+                resetConnectionRetryPolicyCounter()//for retry policy
+                querySkuDetailsAsync(BillingClient.SkuType.INAPP, GameSku.INAPP_SKUS)
+                querySkuDetailsAsync(BillingClient.SkuType.SUBS, GameSku.SUBS_SKUS)
+                queryPurchasesAsync()
+            }
+            BillingClient.BillingResponse.BILLING_UNAVAILABLE -> {
+                //Some apps may choose to make decisions based on this knowledge.
+                Log.d(LOG_TAG, "onBillingSetupFinished but billing is not available on this device")
+            }
+            else -> {
+                //do nothing. Someone else will connect it through retry policy.
+                //May choose to send to server though
+                Log.d(LOG_TAG, "onBillingSetupFinished with failure response code: $responseCode")
+            }
+        }
     }
 
     override fun onConsumeResponse(responseCode: Int, purchaseToken: String?) {
@@ -117,7 +136,27 @@ class BillingRepository private constructor(private val application: Application
     }
 
     override fun onSkuDetailsResponse(responseCode: Int, skuDetailsList: MutableList<SkuDetails>?) {
-        TODO("not implemented") //To change body of created functions use File | Settings | File Templates.
+        if (responseCode != BillingClient.BillingResponse.OK) {
+            Log.w(LOG_TAG, "SkuDetails query failed with response: $responseCode")
+        } else {
+            Log.d(LOG_TAG, "SkuDetails query responded with success. List: $skuDetailsList")
+        }
+
+        if (skuDetailsList.orEmpty().isNotEmpty()) {
+            val scope = CoroutineScope(Job() + Dispatchers.IO)
+            scope.launch {
+                skuDetailsList?.forEach { localCacheBillingClient.skuDetailsDao().insertOrUpdate(it) }
+            }
+        }
+    }
+
+    private fun querySkuDetailsAsync(@BillingClient.SkuType skuType: String, skuList: List<String>) {
+        val params = SkuDetailsParams.newBuilder()
+        params.setSkusList(skuList).setType(skuType)
+        taskExecutionRetryPolicy(playStoreBillingClient, this) {
+            Log.d(LOG_TAG, "querySkuDetailsAsync for $skuType")
+            playStoreBillingClient.querySkuDetailsAsync(params.build(), this)
+        }
     }
 
     /**
