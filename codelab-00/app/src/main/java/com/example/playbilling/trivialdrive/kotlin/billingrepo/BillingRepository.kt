@@ -3,15 +3,20 @@ package com.example.playbilling.trivialdrive.kotlin.billingrepo
 import android.app.Application
 import android.content.Context
 import android.util.Log
+import androidx.annotation.WorkerThread
 import androidx.lifecycle.LiveData
 import com.android.billingclient.api.*
 import com.example.playbilling.trivialdrive.kotlin.billingrepo.BillingRepository.GameSku.CONSUMABLE_SKUS
+import com.example.playbilling.trivialdrive.kotlin.billingrepo.BillingRepository.GameSku.GOLD_STATUS_SKUS
 import com.example.playbilling.trivialdrive.kotlin.billingrepo.BillingRepository.GameSku.INAPP_SKUS
 import com.example.playbilling.trivialdrive.kotlin.billingrepo.BillingRepository.GameSku.SUBS_SKUS
 import com.example.playbilling.trivialdrive.kotlin.billingrepo.BillingRepository.RetryPolicies.resetConnectionRetryPolicyCounter
 import com.example.playbilling.trivialdrive.kotlin.billingrepo.BillingRepository.RetryPolicies.taskExecutionRetryPolicy
+import com.example.playbilling.trivialdrive.kotlin.billingrepo.BillingRepository.Throttle.isLastInvocationTimeStale
+import com.example.playbilling.trivialdrive.kotlin.billingrepo.BillingRepository.Throttle.refreshLastInvocationTime
 import com.example.playbilling.trivialdrive.kotlin.billingrepo.localdb.*
 import kotlinx.coroutines.*
+import java.security.Security
 import java.util.*
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.pow
@@ -85,6 +90,149 @@ class BillingRepository private constructor(private val application: Application
         // normally you don't worry about closing a DB connection unless you have
         // more than one open. so no need to call 'localCacheBillingClient.close()'
         Log.d(LOG_TAG, "startDataSourceConnections")
+    }
+
+    private fun queryPurchasesAsync() {
+        fun task() {
+            Log.d(LOG_TAG, "queryPurchasesAsync called")
+            val purchasesResult = HashSet<Purchase>()
+            var result = playStoreBillingClient.queryPurchases(BillingClient.SkuType.INAPP)
+            Log.d(LOG_TAG, "queryPurchasesAsync INAPP results: ${result?.purchasesList}")
+            result?.purchasesList?.apply { purchasesResult.addAll(this) }
+            if (isSubscriptionSupported()) {
+                result = playStoreBillingClient.queryPurchases(BillingClient.SkuType.SUBS)
+                result?.purchasesList?.apply { purchasesResult.addAll(this) }
+                Log.d(LOG_TAG, "queryPurchasesAsync SUBS results: ${result?.purchasesList}")
+            }
+            processPurchases(purchasesResult)
+        }
+        taskExecutionRetryPolicy(playStoreBillingClient, this) { task() }
+    }
+
+    private fun processPurchases(purchasesResult: Set<Purchase>) = CoroutineScope(Job() + Dispatchers.IO).launch {
+        val cachedPurchases = localCacheBillingClient.purchaseDao().getPurchases()
+        val newBatch = HashSet<Purchase>(purchasesResult.size)
+        purchasesResult.forEach { purchase ->
+            if (isSignatureValid(purchase) && !cachedPurchases.any { it.data == purchase }) {//todo !cachedPurchases.contains(purchase)
+                newBatch.add(purchase)
+            }
+        }
+
+        if (newBatch.isNotEmpty()) {
+            sendPurchasesToServer(newBatch)
+            // We still care about purchasesResult in case a old purchase has not
+            // yet been consumed.
+            saveToLocalDatabase(newBatch, purchasesResult)
+            //consumeAsync(purchasesResult): do this inside saveToLocalDatabase to
+            // avoid race condition
+        } else if (isLastInvocationTimeStale(application)) {
+            handleConsumablePurchasesAsync(purchasesResult)
+            queryPurchasesFromSecureServer()
+        }
+    }
+
+    private fun isSubscriptionSupported(): Boolean {
+        val responseCode = playStoreBillingClient.isFeatureSupported(BillingClient.FeatureType.SUBSCRIPTIONS)
+        if (responseCode != BillingClient.BillingResponse.OK) {
+            Log.w(LOG_TAG, "isSubscriptionSupported() got an error response: $responseCode")
+        }
+        return responseCode == BillingClient.BillingResponse.OK
+    }
+
+    private fun isSignatureValid(purchase: Purchase): Boolean {
+        return Security.verifyPurchase(
+                Security.BASE_64_ENCODED_PUBLIC_KEY,
+                purchase.originalJson,
+                purchase.signature
+        )
+    }
+
+    private fun sendPurchasesToServer(purchases: Set<Purchase>) {
+        //not implemented here
+    }
+
+    private fun queryPurchasesFromSecureServer() {
+        fun getPurchasesFromSecureServerToLocalDB() {//closure
+            //do the actual work of getting the purchases from server
+        }
+        getPurchasesFromSecureServerToLocalDB()
+
+        refreshLastInvocationTime(application)
+    }
+
+    private fun saveToLocalDatabase(newBatch: Set<Purchase>, allPurchases: Set<Purchase>) {
+        val scope = CoroutineScope(Job() + Dispatchers.IO)
+        scope.launch {
+            newBatch.forEach { purchase ->
+                when (purchase.sku) {
+                    GameSku.PREMIUM_CAR -> {
+                        val premiumCar = PremiumCar(true)
+                        insert(premiumCar)
+                        localCacheBillingClient.skuDetailsDao().insertOrUpdate(purchase.sku, premiumCar.mayPurchase())
+                    }
+                    GameSku.GOLD_MONTHLY, GameSku.GOLD_YEARLY -> {
+                        val goldStatus = GoldStatus(true)
+                        insert(goldStatus)
+                        localCacheBillingClient.skuDetailsDao().insertOrUpdate(purchase.sku, goldStatus.mayPurchase())
+                        GOLD_STATUS_SKUS.forEach { otherSku ->
+                            if (otherSku != purchase.sku) {
+                                localCacheBillingClient.skuDetailsDao().insertOrUpdate(otherSku, !goldStatus.mayPurchase())
+                            }
+                        }
+                    }
+                }
+            }
+            localCacheBillingClient.purchaseDao().insert(*newBatch.toTypedArray())
+            handleConsumablePurchasesAsync(allPurchases)
+        }
+    }
+
+    private fun saveToLocalDatabase(purchaseToken: String) {
+        val scope = CoroutineScope(Job() + Dispatchers.IO)
+        scope.launch {
+            val cachedPurchases = localCacheBillingClient.purchaseDao().getPurchases()
+            val match = cachedPurchases.find { it.purchaseToken == purchaseToken }
+            if (match?.sku == GameSku.GAS) {
+                updateGasTank(GasTank(GAS_PURCHASE))
+                localCacheBillingClient.purchaseDao().delete(match)
+            }
+        }
+    }
+
+    private fun handleConsumablePurchasesAsync(purchases: Set<Purchase>) {
+        purchases.forEach {
+            if (GameSku.CONSUMABLE_SKUS.contains(it.sku)) {
+                playStoreBillingClient.consumeAsync(it.purchaseToken, this@BillingRepository)
+                //tell your server:
+                Log.i(LOG_TAG, "handleConsumablePurchasesAsync: asked Play Billing to consume sku = ${it.sku}")
+            }
+        }
+    }
+
+    @WorkerThread
+    suspend fun updateGasTank(gas: GasTank) = withContext(Dispatchers.IO) {
+        Log.d(LOG_TAG, "updateGasTank")
+        var update: GasTank = gas
+        gasTankLiveData.value?.apply {
+            synchronized(this) {
+                if (this != gas) {//new purchase
+                    update = GasTank(getLevel() + gas.getLevel())
+                }
+                Log.d(LOG_TAG, "New purchase level is ${gas.getLevel()}; existing level is ${getLevel()}; so the final result is ${update.getLevel()}")
+                localCacheBillingClient.entitlementsDao().update(update)
+            }
+        }
+        if (gasTankLiveData.value == null) {
+            localCacheBillingClient.entitlementsDao().insert(update)
+            Log.d(LOG_TAG, "No we just added from null gas with level: ${gas.getLevel()}")
+        }
+        localCacheBillingClient.skuDetailsDao().insertOrUpdate(GameSku.GAS, update.mayPurchase())
+        Log.d(LOG_TAG, "updated AugmentedSkuDetails as well")
+    }
+
+    @WorkerThread
+    private suspend fun insert(entitlement: Entitlement) = withContext(Dispatchers.IO) {
+        localCacheBillingClient.entitlementsDao().insert(entitlement)
     }
 
     private fun instantiateAndConnectToPlayBillingService() {
