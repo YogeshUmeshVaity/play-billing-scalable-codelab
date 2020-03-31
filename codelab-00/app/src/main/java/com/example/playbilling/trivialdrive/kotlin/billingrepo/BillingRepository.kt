@@ -1,5 +1,6 @@
 package com.example.playbilling.trivialdrive.kotlin.billingrepo
 
+import android.app.Activity
 import android.app.Application
 import android.content.Context
 import android.util.Log
@@ -75,6 +76,44 @@ class BillingRepository private constructor(private val application: Application
             localCacheBillingClient = LocalBillingDb.getInstance(application)
         }
         localCacheBillingClient.entitlementsDao().getGoldStatus()
+    }
+
+    fun launchBillingFlow(activity: Activity, augmentedSkuDetails: AugmentedSkuDetails) =
+            launchBillingFlow(activity, SkuDetails(augmentedSkuDetails.originalJson))
+
+    fun launchBillingFlow(activity: Activity, skuDetails: SkuDetails) {
+        val oldSku: String? = getOldSku(skuDetails.sku)
+        val purchaseParams = BillingFlowParams.newBuilder().setSkuDetails(skuDetails)
+                .setOldSku(oldSku).build()
+
+        taskExecutionRetryPolicy(playStoreBillingClient, this) {
+            playStoreBillingClient.launchBillingFlow(activity, purchaseParams)
+        }
+    }
+
+    /**
+     * This sample app only offers one item for subscription: GoldStatus. And there are two
+     * ways a user can subscribe to GoldStatus: monthly or yearly. Hence it's easy for
+     * the [BillingRepository] to get the old sku if one exists. You too should have no problem
+     * knowing this fact about your app.
+     *
+     * We must here again reiterate. We don't want to make this sample app overwhelming. And so we
+     * are introducing ideas piecewise. This sample focuses more on overall architecture.
+     * So although we mention subscriptions, it is not about subscription per se. Classy Taxi is
+     * the sample app that focuses on subscriptions.
+     *
+     */
+    private fun getOldSku(sku: String?): String? {
+        var result: String? = null
+        if (GameSku.SUBS_SKUS.contains(sku)) {
+            goldStatusLiveData.value?.apply {
+                result = when (sku) {
+                    GameSku.GOLD_MONTHLY -> GameSku.GOLD_YEARLY
+                    else -> GameSku.GOLD_YEARLY
+                }
+            }
+        }
+        return result
     }
 
     fun startDataSourceConnections() {
