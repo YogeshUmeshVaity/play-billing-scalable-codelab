@@ -11,6 +11,7 @@ import com.example.playbilling.trivialdrive.kotlin.billingrepo.BillingRepository
 import com.example.playbilling.trivialdrive.kotlin.billingrepo.BillingRepository.GameSku.GOLD_STATUS_SKUS
 import com.example.playbilling.trivialdrive.kotlin.billingrepo.BillingRepository.GameSku.INAPP_SKUS
 import com.example.playbilling.trivialdrive.kotlin.billingrepo.BillingRepository.GameSku.SUBS_SKUS
+import com.example.playbilling.trivialdrive.kotlin.billingrepo.BillingRepository.RetryPolicies.connectionRetryPolicy
 import com.example.playbilling.trivialdrive.kotlin.billingrepo.BillingRepository.RetryPolicies.resetConnectionRetryPolicyCounter
 import com.example.playbilling.trivialdrive.kotlin.billingrepo.BillingRepository.RetryPolicies.taskExecutionRetryPolicy
 import com.example.playbilling.trivialdrive.kotlin.billingrepo.BillingRepository.Throttle.isLastInvocationTimeStale
@@ -289,11 +290,38 @@ class BillingRepository private constructor(private val application: Application
     }
 
     override fun onPurchasesUpdated(responseCode: Int, purchases: MutableList<Purchase>?) {
-        TODO("not implemented") //To change body of created functions use File | Settings | File Templates.
+        when (responseCode) {
+            BillingClient.BillingResponse.OK -> {
+                // will handle server verification, consumables, and updating the local cache
+                purchases?.apply { processPurchases(toSet()) }
+            }
+            BillingClient.BillingResponse.ITEM_ALREADY_OWNED -> {
+                //item already owned? call queryPurchasesAsync to verify and process all such items
+                Log.d(LOG_TAG, "already owned items")
+                queryPurchasesAsync()
+            }
+            BillingClient.BillingResponse.DEVELOPER_ERROR -> {
+                Log.e(LOG_TAG, "Your app's configuration is incorrect. Review in the Google Play" +
+                        "Console. Possible causes of this error include: APK is not signed with " +
+                        "release key; SKU productId mismatch.")
+            }
+            else -> {
+                Log.i(LOG_TAG, "BillingClient.BillingResponse error code: $responseCode")
+            }
+        }
     }
 
+    /**
+     * This method is called when the app has inadvertently disconnected from the Google Play
+     * BillingClient. When this occurs, the app should attempt to reconnect using an exponential
+     * backoff policy. Note the distinction between BillingClient.endConnection and disconnected:
+     * - Disconnected means it's okay to try reconnecting.
+     * - endConnection means that the current Google Play BillingClient is now invalid.
+     * To reconnect, you must re-instantiate the BillingClient and then start a new connection.
+     */
     override fun onBillingServiceDisconnected() {
-        TODO("not implemented") //To change body of created functions use File | Settings | File Templates.
+        Log.d(LOG_TAG, "onBillingServiceDisconnected")
+        connectionRetryPolicy { connectToPlayBillingService() }
     }
 
     override fun onBillingSetupFinished(responseCode: Int) {
@@ -317,8 +345,26 @@ class BillingRepository private constructor(private val application: Application
         }
     }
 
+    /**
+     * This is the callback for [BillingClient.consumeAsync]. It's called by [playStoreBillingClient] to notify
+     *  that a consume operation has finished.
+     * Appropriate action should be taken in the app, such as add fuel to user's
+     * car. This information should also be saved on the secure server in case user
+     * accesses the app through another device.
+     */
     override fun onConsumeResponse(responseCode: Int, purchaseToken: String?) {
-        TODO("not implemented") //To change body of created functions use File | Settings | File Templates.
+        Log.d(LOG_TAG, "onConsumeResponse")
+        when (responseCode) {
+            BillingClient.BillingResponse.OK -> {
+                //give user the items s/he just bought by updating the appropriate tables/databases
+                purchaseToken?.apply { saveToLocalDatabase(this) }
+                secureServerBillingClient.onComsumeResponse(purchaseToken, responseCode)
+            }
+            else -> {
+                Log.w(LOG_TAG, "Error consuming purchase with token ($purchaseToken). " +
+                        "Response code: $responseCode")
+            }
+        }
     }
 
     override fun onSkuDetailsResponse(responseCode: Int, skuDetailsList: MutableList<SkuDetails>?) {
@@ -368,7 +414,6 @@ class BillingRepository private constructor(private val application: Application
          * independent of the RetryPolicies. And so the Retry Policy exists only to help and never
          * to hurt.
          */
-
         fun connectionRetryPolicy(block: () -> Unit) {
             Log.d(LOG_TAG, "connectionRetryPolicy")
             val scope = CoroutineScope(Job() + Dispatchers.Main)
