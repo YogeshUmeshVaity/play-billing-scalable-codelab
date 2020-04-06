@@ -131,7 +131,7 @@ class BillingRepository private constructor(private val application: Application
         Log.d(LOG_TAG, "startDataSourceConnections")
     }
 
-    private fun queryPurchasesAsync() {
+    fun queryPurchasesAsync() {
         fun task() {
             Log.d(LOG_TAG, "queryPurchasesAsync called")
             val purchasesResult = HashSet<Purchase>()
