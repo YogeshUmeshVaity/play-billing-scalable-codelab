@@ -21,7 +21,11 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.Toast
+import androidx.lifecycle.Observer
+import androidx.lifecycle.ViewModelProviders
 import androidx.navigation.findNavController
+import com.example.playbilling.trivialdrive.kotlin.billingrepo.localdb.GasTank
+import com.example.playbilling.trivialdrive.kotlin.viewmodels.BillingViewModel
 import com.kotlin.trivialdrive.R
 import kotlinx.android.synthetic.main.fragment_game.*
 
@@ -37,6 +41,9 @@ import kotlinx.android.synthetic.main.fragment_game.*
 class GameFragment : androidx.fragment.app.Fragment() {
     private val LOG_TAG = "GameFragment"
 
+    private var gasLevel: GasTank? = null
+    private lateinit var billingViewModel: BillingViewModel
+
     override fun onCreateView(inflater: LayoutInflater, containter: ViewGroup?, savedInstanceState: Bundle?): View? {
         return inflater.inflate(R.layout.fragment_game, containter, false)
     }
@@ -46,11 +53,31 @@ class GameFragment : androidx.fragment.app.Fragment() {
 
         btn_drive.setOnClickListener { onDrive() }
         btn_purchase.setOnClickListener { onPurchase(it) }
+
+        billingViewModel = ViewModelProviders.of(this).get(BillingViewModel::class.java)
+        billingViewModel.gasTankLiveData.observe(this, Observer {
+            gasLevel = it
+            showGasLevel()
+        })
+        billingViewModel.premiumCarLiveData.observe(this, Observer {
+            it?.apply { showPremiumCar(entitled) }
+        })
+        billingViewModel.goldStatusLiveData.observe(this, Observer {
+            it?.apply { showGoldStatus(entitled) }
+        })
     }
 
     private fun onDrive() {
-        showGasLevel()
-        Toast.makeText(context, getString(R.string.alert_no_gas), Toast.LENGTH_LONG).show()
+        gasLevel?.apply {
+            if (!needGas()) {
+                billingViewModel.decrementAndSaveGas()
+                showGasLevel()
+                Toast.makeText(context, getString(R.string.alert_drove), Toast.LENGTH_LONG).show()
+            }
+        }
+        if (gasLevel?.needGas() != false) {
+            Toast.makeText(context, getString(R.string.alert_no_gas), Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun onPurchase(view: View) {
@@ -58,7 +85,14 @@ class GameFragment : androidx.fragment.app.Fragment() {
     }
 
     private fun showGasLevel() {
-        gas_gauge.setImageResource(R.drawable.gas_level_0)
+        gasLevel?.apply {
+            val drawableName = "gas_level_${getLevel()}"
+            val drawableId = resources.getIdentifier(drawableName, "drawable", requireActivity().packageName)
+            gas_gauge.setImageResource(drawableId)
+        }
+        if (gasLevel == null) {
+            gas_gauge.setImageResource(R.drawable.gas_level_0)
+        }
     }
 
     private fun showPremiumCar(entitled: Boolean) {
@@ -76,5 +110,4 @@ class GameFragment : androidx.fragment.app.Fragment() {
             gold_status.setBackgroundResource(0)
         }
     }
-
 }
